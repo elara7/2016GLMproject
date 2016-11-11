@@ -1,0 +1,702 @@
+---
+title: "基于LDA模型的数据科学相关企业用人关注点分析"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## motivation
+
+大数据时代催生了一个新的学科--数据科学，同时也相应地产生了一系列与数据科学相关的工作岗位。作为一个相对新兴的领域，企业对于相关人才究竟有怎样的要求？针对这些要求，在校生们应该进行哪些方面的准备？这便是我们的项目研究目标
+
+## 数据来源与描述
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+# 提取描述中的信息填补学历和经验要求缺失值
+library(stringr)
+
+df <- as.data.frame(glm_f, stringsAsFactors = FALSE)
+
+sum(df$经验=="无") #3293
+
+df$exp <- str_extract(string = df$描述,pattern = ".{1}[0-9一二三四五六七八九十]{1,2}年") %>%
+
+  str_replace(pattern = "^\\d.+" ,replacement="") %>%
+
+  str_replace(pattern = ".{1}",replacement ="")
+
+df[df$经验=="无" ,9] <- df[df$经验=="无",13]
+
+#sum(df[is.na(df$经验),9 ]) 
+
+#sum(df$经验=="无") #1479
+
+df$经验 <- str_replace_all(df$经验,pattern = "经验" ,replacement="") %>%
+
+  str_replace_all(pattern = "一", replacement="1") %>%
+
+  str_replace_all(pattern = "二|两", replacement="2") %>%
+
+  str_replace_all(pattern = "三", replacement="3") %>%
+
+  str_replace_all(pattern = "四", replacement="4") %>%
+
+  str_replace_all(pattern = "五", replacement="5") %>%
+
+  str_replace_all(pattern = "六", replacement="6") %>%
+
+  str_replace_all(pattern = "七", replacement="7") %>%
+
+  str_replace_all(pattern = "八", replacement="8") %>%
+
+  str_replace_all(pattern = "九", replacement="9") %>%
+
+  str_replace_all(pattern = "十", replacement="十") 
+
+unique(df$经验)
+
+sum(df$学历=="无") #2142
+
+unique(df$学历)
+
+df$edu <- str_extract(string = df$描述,pattern = "大专|本科|硕士|高中|中专|博士|中技|初中") 
+
+df[df$学历=="无" ,10] <- df[df$学历=="无",14]
+
+df[is.na(df$学历),10 ] <- "无" 
+
+sum(df$学历=="无",10) #968
+
+
+
+library(xlsx)
+
+write.xlsx2(x=df,file = "glm_g.xlsx",row.names = FALSE)
+
+
+
+"大专|本科|硕士|高中|中专|博士|中技|初中"
+
+```
+
+## 基于LDA模型的数据科学相关企业用人关注点分析
+
+从数据中我们发现，有大量的关于企业用人的信息隐藏在“职业描述”变量中，因此在此节我们重点对“职业描述”变量进行文本分析。
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+library(readxl)
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(slam)
+library(tm)
+library(tmcn)
+library(jiebaR)
+library(topicmodels)
+library(lasso2)
+library(igraph)
+library(wordcloud2)
+load("R201611051355.RData")
+```
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#############NO RUN
+##加载数据，提取职业描述变量
+glm_ori <- read_excel("~/elara/glm_ori.xlsx")
+#glm_ori <- read_excel("D:/surface-Documents/2016-2017(2)/201609-201701/Generalized linear model/glm_ori.xlsx")
+#DAJTEXT <- read.csv("glm.csv") %>% .[,11] 
+#load("GLM.RData")
+DAJTEXT <- glm_ori[,11]
+#head(DAJTEXT)
+```
+
+让我们来看两条职业描述中的样本：
+
+```{r, echo=FALSE, message=TRUE, warning=TRUE}
+#展示职业描述第1条和327条
+DAJTEXT[327]
+#str_detect(temp2,pattern = url_pattern1)
+```
+
+可以看到职业描述变量本身是一个相对非结构化的变量，其中存在着非常多的制表符、网址、电话等对用人要求无用的信息。同时，在职业描述的末尾，又存在着结构化的2个次级变量：“职能类别”和“关键字”。因此有必要对该变量进行清洗和分离。同时对于职位描述文本部分，由于其非结构化相对严重，较难以直接进行模式匹配，因此采用词袋模型的假设并构建LDA主题模型来进行分析。
+
+具体的文本分析步骤为：
+
+1. 初步清洗文本
+2. 提取“职能类别”和“关键字”信息并进行词频分析
+3. 对剩余的描述文本进一步清洗，分词，去重
+4. 将文本转化为语料库，计算出文档-词汇矩阵，并按TF-IDF指标筛选词汇和文档
+5. 建立LDA主题模型
+6. 根据LDA模型结果提取主题，并进行主题筛选
+7. 根据主题对本研究的问题做出解答
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#############NO RUN
+#总体-消除制表符，文末链接，两端空白和重复，并转英文为小写
+temp1 <- 
+  DAJTEXT %>% 
+  str_replace_all(pattern = "\t|举报|分享|\r", replacement = " ") %>% 
+  str_replace(pattern = "职位描述：", replacement = " ") %>%
+  str_trim(side = "both") %>%
+  str_replace_all(pattern="( )+", replacement = " ") %>% #把多个空格合并一个
+  tolower()
+#head(temp1)
+```
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#############NO RUN
+#总体-分离出职位描述到temp2
+temp2 <- temp1 %>% str_split_fixed(pattern = "\\n", n=2) %>% .[,1]
+#set.seed(2016)
+#sample(temp2, size=20)
+```
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#############NO RUN
+#总体-分离职能类别和关键字到temp3的2个item
+# 分离预处理
+temp3 <- temp1 %>% 
+  str_split_fixed(pattern = "\\n", n=2) %>% #分离职能类别和关键字出来
+  .[,2] %>% 
+  str_trim() %>% 
+  str_split_fixed(pattern="\\n \\n", n=2) #分离职能类别和关键字
+#head(temp3)
+str(temp3)
+```
+
+### 职能类别信息
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#############NO RUN
+#职能类别提取
+# 职能类别
+jobclass <- temp3 %>%
+  .[,1] %>% 
+  str_replace_all(pattern="\\n|职能类别：|/|[[:punct:]]", replacement = " ")  %>%
+  str_replace_all(pattern="( )+", replacement = " ") %>% #把多个空格合并一个
+  str_trim()
+# 出表
+job_word <- lapply(jobclass, FUN = str_split , " ") #分词
+job_table <- table(unlist(job_word)) #列表
+job_table <- sort(job_table, decreasing=TRUE)
+job_table[job_table>=10]
+
+#转化为data.frame,消去其他
+job_frame <- as.data.frame(job_table)
+job_frame <- job_frame[job_frame$Var1 != "其他",]
+```
+
+职能类别信息包含的企业招聘信息所需求的岗位类别，可以从中看出一定的岗位需求信息。
+
+在清除了无用文本与符号、重复内容、空白以后，从中提取出了职能类别变量。在去掉空白和“其他”后，我们得到职能类别出现频率前十的内容如下：
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#提取前10位
+job_des <- job_frame[1:10,]
+colnames(job_des) <- c("职能描述","频数")
+rownames(job_des) <- NULL
+#job_des
+ggplot(job_des,aes(x=职能描述, y= 频数)) +  geom_bar(stat="identity",fill="lightblue")+theme_bw()+coord_flip()+scale_x_discrete(limits= as.character(job_des[order(job_des[,2]),1]))+geom_text(aes(label=频数),colour="black",hjust=1.2)+theme(panel.grid.major=element_blank(),panel.grid.minor=element_blank())
+```
+
+可以看到对于“主管”、“助理”的人员需求最多，分别为1135次和728次。此外“市场分析”、“调研人员“、"业务分析专员"等也都以300次以上的出现频率出现在前十位中。
+
+### 关键字信息
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#############NO RUN
+# 关键字提取
+keyword <- temp3 %>% 
+  .[temp3[,2]!="",2] %>% #提取非空白部分
+  str_replace_all(pattern="\\n|关键字：|[[:punct:]]", replacement = " ")  %>% #把换行标点替换成空格
+  str_replace_all(pattern="( )+", replacement = " ") %>% #把多个空格合并一个
+  str_trim() #去掉首尾空格
+#出表
+key_word <- lapply(keyword, FUN = str_split , " ") #分词
+key_table <- table(unlist(key_word)) #列表
+key_table <- sort(key_table, decreasing=TRUE)
+key_table[key_table>=10]
+
+#转化为data.frame,消去其他
+key_frame <- as.data.frame(key_table)
+#key_frame <- key_frame[key_frame$Var1 != "其他",]
+
+key_en <- key_frame[str_detect(key_frame[,1],pattern = "[a-zA-Z]"),]
+```
+
+关键字信息是企业对与自己的招聘信息的一个高度概括，即吸引了相关人才的注意，也反应了一则招聘信息最希望被关注的内容。
+
+同样的，经过初步清理后，我们得到了出现频率前10的关键字：
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#提取前10位
+key_des <- key_frame
+key_des <- key_des[1:10,]
+colnames(key_des) <- c("关键字","频数")
+rownames(key_des) <- NULL
+# key_des
+ggplot(key_des,aes(x=关键字, y= 频数)) +  geom_bar(stat="identity",fill="lightblue")+theme_bw()+coord_flip()+scale_x_discrete(limits= as.character(key_des[order(key_des[,2]),1]))+geom_text(aes(label=频数),colour="black",hjust=1.2)+theme(panel.grid.major=element_blank(),panel.grid.minor=element_blank())
+```
+
+可以看到前10位的关键字中有6位都涉及到了待遇问题，可见企业希望通过优越的待遇吸引人才的注意。
+
+对于工具软件类关键字，频数前10位的是
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#提取前10位
+key_des_en <- key_en
+key_des_en <- key_des_en[key_des_en[,1]=="sql"|
+                           key_des_en[,1]=="excel"|
+                           key_des_en[,1]=="sas"|
+                           key_des_en[,1]=="java"|
+                           key_des_en[,1]=="spss"|
+                           key_des_en[,1]=="hadoop"|
+                           key_des_en[,1]=="r"|
+                           key_des_en[,1]=="python"|
+                           key_des_en[,1]=="c"|
+                           key_des_en[,1]=="spark",
+                           ] 
+colnames(key_des_en) <- c("关键字","频数")
+rownames(key_des_en) <- NULL
+
+ggplot(key_des_en,aes(x=关键字, y= 频数)) +  geom_bar(stat="identity",fill="lightblue")+theme_bw()+coord_flip()+scale_x_discrete(limits= as.character(key_des_en[order(key_des[,2]),1]))+geom_text(aes(label=频数),colour="black",hjust=1.2)+theme(panel.grid.major=element_blank(),panel.grid.minor=element_blank())
+```
+
+SQL结构化查询语言高居榜首，说明了对数据和数据库的操作、控制需求尤为重要。其次是的Excel、sas和spss这3个商业化的数据分析处理工具，其应用人才也是大多数企业不可或缺的。r和python这2个数据科学中最重要的编程语言也位列前十。而随着大数据时代下大数据处理平台需求的迅猛扩张，hadoop和spark的大数据处理平台也获得了一定关注，java和c语言作为应用极为广泛的编程语言也榜上有名。
+
+
+### 文本清洗与分词
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#############NO RUN
+#职位描述-去除网址和邮箱地址
+url_pattern1 <- "http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+"
+url_pattern2 <- "www\\.(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+"
+url_pattern3 <- "(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$)"
+#url_pattern4 <- "(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+((\\.com)|(\\.cn))(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))*"
+#soyale.tmall.com
+#http:longgang.300.cn/
+#test1 <- " 4xatrm.com"
+#str_extract(test1,pattern = url_pattern3)
+#test2 <- "http://www.xatrm.com "
+#str_extract(test2,pattern = url_pattern3)
+#test3 <- "hatk.dfj@dkdk.cn"
+#str_extract(test3, pattern = url_pattern3)
+#temp4_1 <- temp2 %>% str_replace_all(pattern = url_pattern1, replacement = "")
+#temp4_2 <- temp4_1 %>% str_replace_all(pattern = url_pattern2, replacement = "")
+#write.table(temp4_2, "temp4_2.txt")
+temp4 <- temp2 %>%
+  str_replace_all(pattern=url_pattern1 ,replacement = "") %>%
+  str_replace_all(pattern=url_pattern2 ,replacement = "") %>%
+  str_replace_all(pattern=url_pattern3 ,replacement = "") %>%
+  str_replace_all(pattern="(soyale\\.tmall\\.com)|(http:longgang\\.300\\.cn/)" ,replacement = "") %>%
+  str_replace_all(pattern="[[:punct:]]|[[:digit:]]" ,replacement = " ") %>%
+  str_trim(side = "both") %>%
+  str_replace_all(pattern="( )+", replacement = " ") 
+length(temp4)
+head(temp4)
+temp5 <- temp4[duplicated(temp4)==FALSE]#同一家公司发布好几条，描述相同，剩下7438
+length(temp5)
+#write(temp5, "temp5.txt")
+#sample(temp4,size = 10)
+sum(str_detect(temp5,pattern = "\n"))
+```
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#############NO RUN
+#分词,修正,转化为语料库,停止词处理
+#install.packages(c("tm", "jiebaR"))
+#install.packages("tmcn", repos="http://R-Forge.R-project.org")
+library(tm)
+library(tmcn)
+library(jiebaR)
+#jiebar分词并保存成tm包接受的格式
+mixseg = worker()
+seg <- rep("", length(temp5))
+for (i in 1:length(temp5)) {
+  segtemp <- NULL
+  segtemp<- mixseg <= temp5[i] 
+  for (j in 1:length(segtemp)) {
+    seg[i] <- paste(seg[i],segtemp[j])
+}
+}
+#seg[1]
+#将r修正为r语言避免被清理.c语言的c一般会和c++一起出现，单独的c可能是c座，abc，不一定是c语言，放弃处理
+segr <- seg %>%
+  str_replace_all(pattern = "r 语言", replacement = "r") %>%
+  str_replace_all(pattern = " r ", replacement = " r语言 ")
+#segr[1]
+
+#sum(str_detect(segr,pattern = "\\n"))
+
+#转换为vs资源格式
+vsseg <- VectorSource(segr) 
+
+#转换为corpus语料库格式
+textcorpus <- VCorpus(vsseg, readerControl = list(reader = reader(vsseg), language = "cn"))
+#textcorpus <- Corpus(vsseg)
+
+#去掉中文停止词
+stcorpus <- textcorpus %>% 
+  tm_map(removeWords, stopwordsCN()) %>%
+  tm_map(removeWords, stopwords(kind = "en")) %>%
+  tm_map(removeWords, "一定")
+#stcorpus
+#str(stopwordsCN())
+```
+
+分离出“职能类别”和“关键字”信息后，对剩余的描述文本清除网址、标点、常用词后分词。
+
+对比处理前后的结果如下：
+
+处理前：
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+DAJTEXT[327]
+```
+
+处理后：
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+segr[325]
+```
+
+由于同一家公司的不同岗位招聘信息的职位描述可能一样，所以在去掉重复的描述后最终剩下了`r length(temp5)` 条文档
+
+### 构建文档-词汇矩阵
+
+#### 文档-词汇矩阵与词袋模型
+
+文档-词汇矩阵是词袋模型中广泛使用的一种语料存储形式。所谓词袋模型假设是指，将一篇文档当成是一个装了很多个单词的袋子。其最大的特点是忽略文档中词的顺序位置作用，只考虑词频率，通过简化的假设来使得相关的模型在数学、技术和计算机性能限制下存在应用的可行性。
+
+在这个假设下，一堆文档可以用一个文档-词汇矩阵来表示。文档-词汇矩阵中，每行对应的向量代表一个文档，每列对应的向量代表了一个词，行数即为文档数，列数即为整个语料库总所有词的种数。矩阵中的第(i,j)个元素就是第j个词在第i个文档中出现的频数。
+
+由于一篇文档不一定会出现所有词，一个词也不一定会在所有文档中都出现，所以在文档-词汇矩阵中会存在非常多的零元素，即第j个词在第i个文档中出现的频数为0。这样的矩阵可以通过稀疏矩阵的存储方式保存，稀疏矩阵保存方式是一个三元向量，对于每一个非0元素，用一个向量记录其原始矩阵中的行编号，第二个向量记录其原始矩阵中的列编号，第三个向量记录其原始矩阵中的值，从而将所有的零元素记录抹去，并将矩阵向量化，同时又可以还原，起到在不损失信息的前提下缩小体积提高速度的效果。
+
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+##############NO RUN
+#计算doc-term矩阵
+#生一个矩阵, ncol=词的个数,nrow = 文档的数量,里面的第(i,j)个元素就是第j个词在第i个文档中出现的次数
+dtm_tf <- DocumentTermMatrix(stcorpus, control = list(weighting = weightTf, minWordLength = 2,  removeNumbers = TRUE, removePunctuation = TRUE)) 
+#生成一个矩阵,ncol
+#生一个矩阵, ncol=词的个数,nrow = 文档的数量,里面的第(i,j)个元素就是第j个词在第i个文档中出现的频率
+dtm_idf <- DocumentTermMatrix(stcorpus, control = list(weighting = weightTfIdf, minWordLength = 2))
+#根据bin
+#dtm_bin <- DocumentTermMatrix(stcorpus, control = list(weighting = weightBin, minWordLength = 2)) 
+#根据smart
+#dtm_smart <- DocumentTermMatrix(stcorpus, control = list(weighting = weightSMART, minWordLength = 2))
+dtm_tf_ori <- dtm_tf
+dtm_idf_ori <- dtm_idf
+dim(dtm_tf)#7438x12837
+dim(dtm_idf)#7438x12837
+#install.packages("slam")
+#library("slam")
+
+#tf->tfidf
+length(col_sums(dtm_tf))#列和，即词频数向量，45051个词，每个数字表示对应词出现的频数
+summary(col_sums(dtm_tf))#每个词出现的次数分布
+ #Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+#1.000    1.000    1.000    4.533    2.000 9618.000 
+
+length(row_sums(dtm_tf))#行和，即文档长度向量，7438个文档。
+summary(row_sums(dtm_tf))
+#Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#1.00   16.00   22.00   27.46   31.00  508.00 
+
+length(dtm_tf$v)#182914,稀疏矩阵的非零元素
+
+
+#row_sums(dtm_tf)[dtm_tf$i] 把每个文档的长度值对应到每个词上
+#dtm_tf$j 非0的j的位置，即按出现的词分组计算tf的均值，就是算每个词的词频率均值
+#用tf矩阵算tfidf矩阵
+#tapply(dtm_tf$v/row_sums(dtm_tf)[dtm_tf$i], dtm_tf$j, mean) 计算每个词的平均tf
+#log2(nDocs(dtm_tf)/col_sums(dtm_tf > 0)) 计算每个词的idf
+#term_tfidf每个词的平均tfidf
+term_tfidf <-
+  tapply(dtm_tf$v/row_sums(dtm_tf)[dtm_tf$i], dtm_tf$j, mean) *
+  log2(nDocs(dtm_tf)/col_sums(dtm_tf > 0))
+
+
+length(term_tfidf)#45051
+summary(term_tfidf)
+#    Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+# 0.01736  0.25220  0.38970  0.43940  0.55920 12.86000 
+
+#直接有tfidf矩阵dtm_idf 
+term_tfidf2 <- tapply(dtm_idf$v, dtm_idf$j, mean) 
+length(term_tfidf2)#45051
+summary(term_tfidf2)#和term_tfidf一致
+
+
+
+#选择比均值tfidf高的词
+dtm_tf_new <- dtm_tf[,term_tfidf >= 0.1224828 ]
+dim(dtm_tf_new)#7438 22383
+#选择剩余有用词数量大于0的文档
+dtm_tf_new  <- dtm_tf_new[row_sums(dtm_tf_new) > 0,]
+dim(dtm_tf_new)#7231 22383
+#查看词频率分布
+summary(col_sums(dtm_tf_new))
+summary(row_sums(dtm_tf_new))
+quantile(term_tfidf,0.1)
+
+findFreqTerms(dtm_tf_new,1)
+
+#找出词频前100
+#findFreqTerms(dtm_tf, 100)
+#findFreqTerms(dtm_idf, 50)
+#找出关联度>0.5
+#findAssocs(dtm_tf,"r语言", 0.25)
+#findAssocs(dtm_idf,"r语言", 0.1)#good
+
+dtm <- dtm_tf_new
+
+```
+
+通过计算得到的文档-词汇矩阵的行数即文档个数是`r nrow(dtm_tf)`，列即词汇总数为`r ncol(dtm_tf)`。
+
+#### TF-IDF
+
+直接统计词频存在一个严重的缺点：无法消除常用词的影响。
+
+我们知道，有许多词是常用词，这些词在大多数场合下都会经常出现，正因为这样，这些词本身带来的信息量其实很小。然而由于他们的词频很大，直接根据词频判断词的重要性不可避免地会使这些信息量少的常用词的重要性被高估。比如大多数招聘信息中都有出现的“岗位职责”、“职位描述”等词，就是如此。
+
+为了消除这类词的影响，有一种加权方式叫做TF-IDF(term frequency–inverse document frequency)，也称词频-逆文档频率。其基本思想是，如果一个词在某个文章中出现的频率TF高，但是在其他文章中很少出现，那么这个词就是这个文章中比较重要的词。所以一个词的重要性有2个方面，第一，频率高，第二，在整个预料库中频率不高。为达到这个目的，TF-IDF的计算分为2个部分：
+
+TF：对于一个总共有k个词的文档i，其中第j个词的出现频数为$n_{i,j}$,则第i个文档中第j个词的TF值为
+
+$$tf_{i,j} = \frac{n_{i,j}}{\sum_k{n{i,j}}}$$
+
+即词在文档中的出现频率；
+
+IDF：对于一个文档总数为D的语料库，字典中第j个词的IDF为：
+
+$$idf_{j} = log \frac{|D|}{|\{i:t_j \in d_i\}|}$$
+即包含第j个词的文档占总文档比例的倒数的对数；
+
+最后，第j个词在第i个文档中的TF-IDF值即为：
+$$tfidf_{i,j} = tf_{i,j} \times idf_j$$
+
+为了找出不重要的词，我们对每个词计算它们在所有文档上的平均TF-IDF值，计算得到的平均TF-IDF数值分布如下：
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+summary(term_tfidf)
+```
+
+为了消除常用词等重要性很低的词的干扰，同时也为了适当减低模型计算开销，我们以TF-IDF作为词总要性依据，删除了TF-IDF值小于10%分位数的词汇，并对应消除掉因为消除了词汇导致文本缩短为0的文档。
+
+最终的文档-词汇矩阵的行，即包含文档数为`r nrow(dtm_tf_new)`,列数量，即词汇数为`r ncol(dtm_tf_new)`。
+
+### 建立LDA主题模型
+
+#### LDA主题模型
+
+LDA主题模型全称为隐含狄利克雷分布主题模型(Latent Dirichlet Allocation Topics Model)，由Blei, David M.、Ng, Andrew Y.、Jordan于2003年提出。本质上是一种基于词袋假设的非监督文本聚类模型。
+
+LDA主题模型的假设是，人们完成一篇文章的过程如下：
+1. 先在脑海中想象出文章的几个主题，在书写每个词的时候首先按一定的概率分布从主题集合中选择一个主题；
+2. 然后在主题下相关的单词集合中，按照一定的概率分布选择某个单词。
+3. 不断重复上述2个步骤直到完成一篇文档。
+
+LDA主题模型就是假定人类的文章由以上假设的步骤完成，通过计算，推测出一堆文章中出现的主题，并给出各篇文章中各个主题出现的概率大小（主题分布）。
+
+#### 主题个数选择
+
+LDA主题模型作为一种非监督的聚类方法，要求指定分类（主题）个数，关于主题个数的选择方法，目前并没有一个定论。我们采用了比较常见的5折交叉验证方法，计算不同主题数的模型效果。计算的主题个数从5个到60个，间隔5个取一次。验证指标是模型的返回的似然函数值。
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+############NO RUN
+#5cv计算最佳主题数（依据最大似然估计）
+smp<-function(cross=5,n,seed)
+{
+  set.seed(seed)
+  dd=list()
+  aa0=sample(rep(1:cross,ceiling(n/cross))[1:n],n)
+  for (i in 1:cross) dd[[i]]=(1:n)[aa0==i]
+  return(dd)
+}
+selectK<-function(dtm,kv=seq(5,60,5),SEED=2016,cross=5,sp)
+{
+  per_gib=NULL
+  log_gib=NULL
+  for (k in kv)
+  {
+    per=NULL
+    loglik=NULL
+    for (i in 1:cross)
+    {
+      te=sp[[i]]
+      tr=setdiff(1:nrow(dtm),te)
+      Gibbs = LDA(dtm[tr,], k = k, method = "Gibbs",
+                  control = list(seed = SEED, burnin = 1000,
+                                 thin = 100, iter = 1000))
+      per=c(per,perplexity(Gibbs,newdata=dtm[te,]))
+      loglik=c(loglik,logLik(Gibbs,newdata=dtm[te,]))
+    }
+    
+    per_gib=rbind(per_gib,per)
+    log_gib=rbind(log_gib,loglik)
+  }
+  return(list(perplex=per_gib,loglik=log_gib))
+}
+
+sp=smp(n=nrow(dtm),seed=2016)
+
+system.time((gibK=selectK(dtm=dtm,kv=seq(5,60,5),SEED=2016,cross=5,sp=sp)))
+
+m_per=apply(gibK[[1]],1,mean)
+
+m_log=apply(gibK[[2]],1,mean)
+k=seq(5,60,5)
+plot(x=k,y=m_per)
+k[which.min(m_per)]
+plot(x=k,y=m_log)
+k[which.max(m_log)]
+```
+
+似然函数值随模型主题个数的变化规律如图：
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+k=seq(5,60,5)
+#plot(x=k,y=m_per)
+#k[which.min(m_per)]
+#plot(x=k,y=m_log)
+logdata <-  data.frame(x=k,y=m_log)
+ggplot(logdata,aes(x=k,y=m_log))+geom_point()+theme_bw()+theme(panel.grid.major=element_blank(),panel.grid.minor=element_blank())+xlab("主题数")+ylab("极大似然值")
+#k[which.max(m_log)]
+```
+
+从图中可以看到`r k[which.max(m_log)]`是极大似然值最大的主题数，因此我们选择提取`r k[which.max(m_log)]`个主题。
+
+### 根据LDA模型结果提取主题，绘制词关联图和主题词云
+
+由于LDA主题模型受各项参数影响，可能倾向于提取较多的主题数。对主题的解释还需要人工对得到的主题进行筛选。
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+#Topicn20 <- topics(DA_TM20[["Gibbs"]])
+Termsn20 <- terms(DA_TM20[["Gibbs"]],10)
+```
+
+#### 词关联图
+
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 全部主题
+set.seed(2000)
+tfs = as.data.frame(terms(DA_TM20[["Gibbs"]], 10), stringsAsFactors = F)
+adjacent_list = lapply(1:20, function(i) embed(tfs[,i], 2)[, 2:1]) 
+edgelist = as.data.frame(do.call(rbind, adjacent_list), stringsAsFactors =F)
+topic = unlist(lapply(1:20, function(i) rep(i, 9)))
+edgelist$topic = topic
+g <-graph.data.frame(edgelist,directed=T )
+l<-layout.fruchterman.reingold(g)
+# edge.color="black"
+nodesize = centralization.degree(g)$res 
+V(g)$size = log( centralization.degree(g)$res )
+
+nodeLabel = V(g)$name
+E(g)$color =  unlist(lapply(sample(colors()[26:137], 20), function(i) rep(i, 9))); unique(E(g)$color)
+# 保存图片格式
+png(  paste(getwd(), "/topic_graph_gibbs20.png", sep=""),
+    width=5, height=5, 
+    units="in", res=700)
+
+plot(g, vertex.label= nodeLabel,  edge.curved=TRUE, 
+     vertex.label.cex =0.8,  edge.arrow.size=0.3, layout=l )
+
+# 结束保存图片
+dev.off()
+```
+
+词关联图中，不同的颜色的连线表达不同的主题中的关键词，换言之就是LDA模型假设中，一个主题下对应的词库；连线的箭头表示这个词与主题相关度的递减方向，同一个颜色的连线起点表示与该主题关系最为紧密的一个词；连线的交叉表示2个主题同时涉及到交叉处的关键词。交叉次数较多的点会以较大的黄圈表示。
+
+本次研究中我们简单地仅对前10个主题进行分析，得到的关联图如下：
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 前10个主题
+tfs = as.data.frame(terms(DA_TM20[["Gibbs"]], 10), stringsAsFactors = F)
+adjacent_list = lapply(1:10, function(i) embed(tfs[,i], 2)[, 2:1]) 
+edgelist = as.data.frame(do.call(rbind, adjacent_list), stringsAsFactors =F)
+topic = unlist(lapply(1:10, function(i) rep(i, 9)))
+edgelist$topic = topic
+g <-graph.data.frame(edgelist,directed=T )
+l<-layout.fruchterman.reingold(g)
+# edge.color="black"
+nodesize = centralization.degree(g)$res 
+V(g)$size = log( centralization.degree(g)$res )
+
+nodeLabel = V(g)$name
+E(g)$color =  unlist(lapply(sample(colors()[26:137], 10), function(i) rep(i, 9))); unique(E(g)$color)
+
+# 保存图片格式
+png(  paste(getwd(), "/topic_graph_gibbs.png", sep=""),
+    width=5, height=5, 
+    units="in", res=700)
+
+plot(g, vertex.label= nodeLabel,  edge.curved=TRUE, 
+     vertex.label.cex =0.5,  edge.arrow.size=0.3, layout=l )
+
+# 结束保存图片
+dev.off()
+```
+
+从关联图中可以看到：
+
+1. 团队精神在2个主题中被交叉提及，这2个主题分别是从逻辑思维和沟通开始的主题。逻辑思维能力关系着员工的表达能力，影响着企业的项目管理，影响着企业内部的合作，而沟通能力则直接影响着企业的效率（KPI），这2方面综合的要求都是对团队精神的要求，说明企业对员工团队精神的重视；
+2. 沟通关联着2个主题，一个主题关系着项目的运作，一个主题关系着个人的品质。项目运作方面，沟通能力影响着效率，影响着工作的过程；个人品质方面，沟通能力关系着解决问题的能力。可以看到，企业对沟通能力的内在要求之强烈。
+3. 逻辑思维能力除了作为一个主题的出发点，同时也影响着统计分析主题。可以想象，逻辑思维能力过于薄弱，自然也难以胜任统计分析工作的分析报告，数据处理等。
+4. 分析报告在数据挖掘出发的主题和统计分析出发的主题中都被提及。这说明在数据挖掘和统计分析工作中，分析报告的撰写尤为重要。没有了分析报告，统计分析和数据挖掘工作就失去了载体。
+
+#### 主题词云
+
+透过关联图，我们发现有些主题是相对独立的，比如以excel、人力资源、新媒体、搜索引擎、市场调研开头的主题。这些主题在图中仅仅表现出了各个细分领域下的能力要求，如市场调研相关主题重点提到了“新产品”，暗含了对人才创新能力和资源变现成产品的能力的要求，同时也重点提到了对应变能力的要求。
+
+而其他几个主题，包括从逻辑思维、统计分析、数据挖掘、沟通出发的主题，则互相之间关联较大，更多地体现了对求职者要求的共性。因此我们对这几个主题进行了词云绘制：
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+hoverFunction = htmlwidgets::JS("function hover() {}")
+#逻辑思维
+wd6 <- data.frame(terms(DA_TM20[["Gibbs"]], 50)[,6],exp(seq(3,2.02,-0.02)),stringsAsFactors = FALSE)
+wordcloud2(wd6 ,minRotation = 0,maxRotation = 0,hoverFunction=hoverFunction)
+#统计分析
+wd9 <- data.frame(terms(DA_TM20[["Gibbs"]], 50)[,9],exp(seq(3,2.02,-0.02)),stringsAsFactors = FALSE)
+wordcloud2(wd9 ,minRotation = 0,maxRotation = 0,hoverFunction=hoverFunction)
+
+#数据挖掘
+wd10 <- data.frame(terms(DA_TM20[["Gibbs"]], 50)[,10],exp(seq(3,2.02,-0.02)),stringsAsFactors = FALSE)
+wordcloud2(wd10 ,minRotation = 0,maxRotation = 0,hoverFunction=hoverFunction)
+
+#沟通
+wd3_8 <- data.frame(
+  c(terms(DA_TM20[["Gibbs"]],25)[,3],terms(DA_TM20[["Gibbs"]],25)[,8]),
+  exp(seq(3,2.02,-0.02)),stringsAsFactors = FALSE)
+wordcloud2(wd3_8 ,minRotation = 0,maxRotation = 0,hoverFunction=hoverFunction)
+
+```
+
+从图中可以得知：
+
+1. 逻辑思维能力与诸多企业管理息息相关，同时还要求求职者具有较强的表达能力，团队精神，以及责任心；
+2. 统计分析能力上，要求具有较强的逻辑思维能力，懂得数据处理，尤其是分析报告和数据报表的完成。工作中也要求认真细致，善于发现；
+3. 数据挖掘能力方面，要求掌握一定的程序工具，比如r语言、python、sql、sas、spss等等。对于统计学、数据模型、数理统计等也有要求。同时和统计分析一样，都提到了“价值”，可以想象企业对于求职者的期待是善于分析和发现数据中的价值；
+4. 由沟通开始的主题可以归纳为个人品质的一个方面。其中要求求职者要“积极主动”，具有较强的“理解能力”，善于“解决问题”，提出“解决方案”。
+
+### 本节结论
+
+通过LDA模型的初步分析，我们对求职者的基本建议如下：
+1. 注重培养自己的逻辑思维能力，使自己思路清晰，面对问题快速反应；
+2. 强化自己的沟通水平，准确表达自己的意图，合理表达自己的请求；
+3. 多多与人合作，培养自己的团队精神，为团队整体努力而不只是考虑个人；
+4. 善于从平凡的日常或冰冷的数字中发现问题，并快速理解问题，提出解决方案；
+5. 掌握至少一门数据分析处理工具，如excel、sas等传统商业处理工具，或现在热门的R、python等编程语言。此外也要熟悉sql语言的应用。
+
+本节的分析限于时间精力和计算机性能，只对前10个主题进行的粗略的分析，20个主题的主题图中蕴含着更加丰富而出人意料的信息：
+
+
+往后还可以在模型参数设定、主题数目、图形解释上进行更进一步的研究。
